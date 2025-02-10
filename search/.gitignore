@@ -45,3 +45,7 @@ wukongim*_data/
 external_ip.txt
 
 wukongim.pid
+
+db/
+
+message.bleve/
