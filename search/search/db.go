@@ -3,7 +3,9 @@ package search
 import (
 	"encoding/binary"
 	"fmt"
+	"path"
 
+	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/cockroachdb/pebble"
 )
 
@@ -17,17 +19,24 @@ func newDb() *db {
 	d := &db{
 		channelMsgMaxSeqPrefix: "channel_msg_max_seq:",
 	}
-	opts := d.defaultPebbleOptions()
 
-	db, err := pebble.Open("db", opts)
-	if err != nil {
-		panic(err)
-	}
-	d.pebbleDb = db
 	return d
 }
 
+func (d *db) open() error {
+	opts := d.defaultPebbleOptions()
+	db, err := pebble.Open(path.Join(pdk.S.SandboxDir(), "db"), opts)
+	if err != nil {
+		return err
+	}
+	d.pebbleDb = db
+	return nil
+}
+
 func (d *db) close() {
+	if d.pebbleDb == nil {
+		return
+	}
 	d.pebbleDb.Close()
 }
 

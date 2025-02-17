@@ -7,6 +7,7 @@ import (
 	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
 	"github.com/WuKongIM/wklog"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -66,6 +67,7 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 			ChannelId:       indexReq.channelId,
 			ChannelType:     uint32(indexReq.channelType),
 			StartMessageSeq: msgSeq + 1,
+			Limit:           500,
 		})
 
 	}
@@ -79,7 +81,6 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 		return
 	}
 
-	fmt.Println("messageResp---->", messageResp)
 	if len(messageResp.ChannelMessageResps) == 0 {
 		b.Warn("channel message is empty", zap.Int("channelMessageReqs", len(reqs)))
 		return
@@ -104,7 +105,7 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 		// 如果消息数量大于等于limit，继续请求
 		if len(resp.Messages) >= int(resp.Limit) {
 
-			time.Sleep(time.Millisecond * 200)
+			time.Sleep(time.Millisecond * 500) // 防止请求过快
 
 			select {
 			case b.indexChan <- indexReq{
@@ -122,9 +123,13 @@ func (b *bucket) buildIndex(channelId string, channelType uint8, msgs []*pluginp
 
 	batch := b.s.msgIndex.NewBatch()
 	for _, msg := range msgs {
-		err := batch.Index(fmt.Sprintf("%d", msg.MessageId), msg)
-		if err != nil {
-			b.Error("index message error", zap.Error(err), zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int64("messageId", msg.MessageId), zap.Uint64("messageSeq", msg.MessageSeq))
+		if gjson.ValidBytes(msg.Payload) {
+
+			m := newMessageFrom(msg)
+			err := batch.Index(fmt.Sprintf("%d", msg.MessageId), m)
+			if err != nil {
+				b.Error("index message error", zap.Error(err), zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int64("messageId", msg.MessageId), zap.Uint64("messageSeq", msg.MessageSeq))
+			}
 		}
 	}
 	return b.s.msgIndex.Batch(batch)
