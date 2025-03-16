@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,9 +92,6 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 		c.ResponseError(err)
 		return
 	}
-
-	reqBytes, _ := json.Marshal(req)
-	fmt.Println("usersearch-req----->", string(reqBytes))
 
 	if req.Uid == "" {
 		c.ResponseError(fmt.Errorf("uid is empty"))
@@ -223,14 +219,6 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 		Limit:    req.Limit,
 		Messages: messages,
 	})
-}
-
-func parseUint64(str string) uint64 {
-	if str == "" {
-		return 0
-	}
-	i, _ := strconv.ParseUint(str, 10, 64)
-	return i
 }
 
 func getRealChannelId(uid, channelId string) string {
