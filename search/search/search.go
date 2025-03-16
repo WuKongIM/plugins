@@ -1,6 +1,7 @@
 package search
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"strconv"
@@ -59,11 +60,9 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 		panic(err)
 	}
 
-	indexMapping.DefaultAnalyzer = "keyword"
-
 	// 创建一个文档映射
 	docMapping := bleve.NewDocumentMapping()
-	indexMapping.AddDocumentMapping("message", docMapping)
+	indexMapping.DefaultMapping = docMapping
 
 	// 添加字段映射
 	fromFieldMapping := bleve.NewTextFieldMapping()
@@ -71,8 +70,8 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 	docMapping.AddFieldMappingsAt("from_uid", fromFieldMapping)
 
 	// channelId
-	channelIdFieldMapping := bleve.NewTextFieldMapping()
-	channelIdFieldMapping.Analyzer = "keyword"
+	channelIdFieldMapping := bleve.NewKeywordFieldMapping()
+	channelIdFieldMapping.Analyzer = "keyword" // 关键配置：禁用分词
 	docMapping.AddFieldMappingsAt("channel_id", channelIdFieldMapping)
 
 	// channelType
@@ -84,22 +83,26 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 	docMapping.AddFieldMappingsAt("message_seq", messageSeqFieldMapping)
 
 	// timestamp
-	timestampFieldMapping := bleve.NewDateTimeFieldMapping()
+	timestampFieldMapping := bleve.NewNumericFieldMapping()
 	docMapping.AddFieldMappingsAt("timestamp", timestampFieldMapping)
 
 	// topic
 	topicFieldMapping := bleve.NewTextFieldMapping()
-	topicFieldMapping.Analyzer = "keyword"
 	docMapping.AddFieldMappingsAt("topic", topicFieldMapping)
+
+	// payload
+	payloadFieldMapping := gse.NewDoc()
 
 	// payload.content
 	contentFieldMapping := gse.NewTextMap()
 	contentFieldMapping.IncludeTermVectors = true
-	docMapping.AddFieldMappingsAt("payload.content", contentFieldMapping)
+	payloadFieldMapping.AddFieldMappingsAt("content", contentFieldMapping)
 
 	// payload.type
 	typeFieldMapping := bleve.NewNumericFieldMapping()
-	docMapping.AddFieldMappingsAt("payload.type", typeFieldMapping)
+	payloadFieldMapping.AddFieldMappingsAt("type", typeFieldMapping)
+
+	docMapping.AddSubDocumentMapping("payload", payloadFieldMapping)
 
 	return indexMapping
 
@@ -118,9 +121,12 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 
 		orQuery := bleve.NewDisjunctionQuery()
 		for _, channel := range req.Channels {
+
+			channelQuery := bleve.NewConjunctionQuery()
+
 			termQuery := bleve.NewTermQuery(channel.ChannelId)
 			termQuery.SetField("channel_id")
-			orQuery.AddQuery(termQuery)
+			channelQuery.AddQuery(termQuery)
 
 			if channel.ChannelType != 0 {
 				ftype := float64(channel.ChannelType)
@@ -128,17 +134,46 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 				end := ftype + 1
 				termQuery := bleve.NewNumericRangeQuery(&start, &end)
 				termQuery.SetField("channel_type")
-				orQuery.AddQuery(termQuery)
+				channelQuery.AddQuery(termQuery)
 			}
+			orQuery.AddQuery(channelQuery)
 		}
 		query.AddQuery(orQuery)
 
 	}
 
-	if strings.TrimSpace(req.PayloadContent) != "" {
-		bleveQuery := bleve.NewMatchQuery(req.PayloadContent)
-		bleveQuery.SetField("payload.content")
-		query.AddQuery(bleveQuery)
+	if strings.TrimSpace(req.ChannelId) != "" {
+		termQuery := bleve.NewTermQuery(req.ChannelId)
+		termQuery.SetField("channel_id")
+		query.AddQuery(termQuery)
+
+		if req.ChannelType != 0 {
+			ftype := float64(req.ChannelType)
+			start := ftype
+			end := ftype + 1
+			termQuery := bleve.NewNumericRangeQuery(&start, &end)
+			termQuery.SetField("channel_type")
+			query.AddQuery(termQuery)
+		}
+	}
+
+	if len(req.Payload) > 0 {
+		// or条件查询
+		payloadQuery := bleve.NewDisjunctionQuery()
+
+		exist := false
+		for k, v := range req.Payload {
+			if strings.TrimSpace(v) == "" {
+				continue
+			}
+			exist = true
+			bleveQuery := bleve.NewMatchQuery(v)
+			bleveQuery.SetField(fmt.Sprintf("payload.%s", k))
+			payloadQuery.AddQuery(bleveQuery)
+		}
+		if exist {
+			query.AddQuery(payloadQuery)
+		}
 	}
 
 	if strings.TrimSpace(req.Topic) != "" {
@@ -172,7 +207,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 		}
 
 		if req.EndTime > 0 {
-			endTime := float64(req.EndTime)
+			endTime := float64(req.EndTime + 1) // TODO: 这里+1 是为了包含结束时间
 			end = &endTime
 		}
 
@@ -185,6 +220,13 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 	searchRequest := bleve.NewSearchRequest(query)
 	searchRequest.Fields = []string{"*"}
 
+	if len(req.Highlights) > 0 {
+		searchRequest.Highlight = bleve.NewHighlight()
+		for _, field := range req.Highlights {
+			searchRequest.Highlight.AddField(field)
+		}
+	}
+
 	from := 0
 
 	if req.Page > 0 {
@@ -192,7 +234,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 	}
 	searchRequest.From = from
 	searchRequest.Size = req.Limit
-	searchRequest.SortBy([]string{"-timestamp"})
+	searchRequest.SortBy([]string{"-_score", "-timestamp"}) // 先按照相关度排序，再按照时间排序
 
 	searchResult, err := s.msgIndex.Search(searchRequest)
 	if err != nil {
@@ -210,7 +252,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			channelId   string
 			channelType uint8
 			streamNo    string
-			streamSeq   uint32
+			streamId    uint64
 			payload     interface{}
 			topic       string
 			timestamp   uint32
@@ -229,7 +271,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 		}
 
 		// fromUid
-		fromUidObj := hit.Fields["from"]
+		fromUidObj := hit.Fields["from_uid"]
 		if fromUidObj != nil {
 			fromUid = fromUidObj.(string)
 		}
@@ -252,17 +294,39 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			streamNo = streamNoObj.(string)
 		}
 
-		// streamSeq
-		streamSeqObj := hit.Fields["stream_seq"]
+		// streamId
+		streamSeqObj := hit.Fields["stream_id"]
 		if streamSeqObj != nil {
-			streamSeq = uint32(streamSeqObj.(float64))
+			streamId = uint64(streamSeqObj.(float64))
 		}
 
 		// payload
-		if hit.Fields["payload.type"] != nil && hit.Fields["payload.content"] != nil {
-			payload = map[string]interface{}{
-				"type":    hit.Fields["payload.type"],
-				"content": hit.Fields["payload.content"],
+		var payloadMap map[string]interface{}
+		for fieldKey, fieldValue := range hit.Fields {
+			if fieldValue == nil {
+				continue
+			}
+			if strings.HasPrefix(fieldKey, "payload.") {
+				if payloadMap == nil {
+					payloadMap = make(map[string]interface{})
+				}
+				key := strings.TrimPrefix(fieldKey, "payload.")
+				payloadMap[key] = fieldValue
+			}
+
+		}
+
+		if len(payloadMap) > 0 {
+			payload = payloadMap
+
+			// 如果有高亮内容，替换payload原来的值
+			if len(hit.Fragments) > 0 {
+				for k, v := range hit.Fragments {
+					if strings.HasPrefix(k, "payload.") {
+						key := strings.TrimPrefix(k, "payload.")
+						payloadMap[key] = strings.Join(v, "")
+					}
+				}
 			}
 		}
 
@@ -278,6 +342,12 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			timestamp = uint32(timestampObj.(float64))
 		}
 
+		var payloadBytes []byte
+
+		if payload != nil {
+			payloadBytes, _ = json.Marshal(payload)
+		}
+
 		msg := &Message{
 			MessageId:    msgId,
 			MessageIdStr: hit.ID,
@@ -287,8 +357,9 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			ChannelId:    channelId,
 			ChannelType:  channelType,
 			StreamNo:     streamNo,
-			StreamSeq:    streamSeq,
-			Payload:      payload,
+			StreamId:     streamId,
+			Payload:      payloadBytes,
+			PayloadJson:  payload,
 			Topic:        topic,
 			Timestamp:    timestamp,
 		}
@@ -334,15 +405,18 @@ func (s Search) bucketIndex(channelId string) int {
 }
 
 type SearchReq struct {
-	Channels       []*pluginproto.Channel `json:"channels"`        // 频道
-	FromUid        string                 `json:"from_uid"`        // 发送者
-	PayloadContent string                 `json:"payload_content"` // 消息内容
-	PayloadTypes   []int                  `json:"payload_types"`   // 消息类型集合
-	Page           int                    `json:"page"`            // 页码，默认为1
-	Limit          int                    `json:"limit"`           // 消息数量限制
-	Topic          string                 `json:"topic"`           // 消息主题
-	StartTime      uint64                 `json:"start_time"`      // 开始时间
-	EndTime        uint64                 `json:"end_time"`        // 结束时间
+	Channels     []*pluginproto.Channel `json:"channels"`      // 频道 (查询内容限制在这些频道内)
+	ChannelId    string                 `json:"channel_id"`    // 频道ID，如果指定了频道ID，则查询此频道内的消息
+	ChannelType  uint8                  `json:"channel_type"`  // 频道类型
+	FromUid      string                 `json:"from_uid"`      // 发送者
+	Payload      map[string]string      `json:"payload"`       // 消息内容
+	PayloadTypes []int                  `json:"payload_types"` // 消息类型集合
+	Page         int                    `json:"page"`          // 页码，默认为1
+	Limit        int                    `json:"limit"`         // 消息数量限制
+	Topic        string                 `json:"topic"`         // 消息主题
+	StartTime    uint64                 `json:"start_time"`    // 开始时间
+	EndTime      uint64                 `json:"end_time"`      // 结束时间(结果包含此时间)
+	Highlights   []string               `json:"highlights"`    // 高亮字段
 }
 
 func (s SearchReq) Clone() SearchReq {
@@ -374,8 +448,9 @@ type Message struct {
 	ChannelId    string  `json:"channel_id,omitempty"`    // 频道ID
 	ChannelType  uint8   `json:"channel_type,omitempty"`  // 频道类型
 	Payload      Payload `json:"payload,omitempty"`       // 消息内容
+	PayloadJson  Payload `json:"payload_json,omitempty"`  // 消息内容 json形式
 	StreamNo     string  `json:"stream_no,omitempty"`     // 流编号
-	StreamSeq    uint32  `json:"stream_seq,omitempty"`    // 流序号
+	StreamId     uint64  `json:"stream_id,omitempty"`     // 流id
 	Topic        string  `json:"topic,omitempty"`         // 消息主题
 	Timestamp    uint32  `json:"timestamp,omitempty"`     // 时间戳
 }
@@ -394,7 +469,7 @@ func newMessageFrom(m *pluginproto.Message) *Message {
 		ChannelType:  uint8(m.ChannelType),
 		Payload:      jsonObj,
 		StreamNo:     m.StreamNo,
-		StreamSeq:    m.StreamSeq,
+		StreamId:     m.StreamId,
 		Topic:        m.Topic,
 		Timestamp:    m.Timestamp,
 	}

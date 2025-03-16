@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	wkproto "github.com/WuKongIM/WuKongIMGoProto"
 	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
 	"github.com/WuKongIM/plugins/search/search"
@@ -43,8 +45,6 @@ func New() interface{} {
 
 // Setup 插件初始化
 func (s Search) Setup() {
-	fmt.Println("Setup....")
-
 	s.s.Start()
 }
 
@@ -59,14 +59,12 @@ func (s Search) Route(r *pdk.Route) {
 
 // PersistAfter 持久化消息后，更新索引
 func (s Search) PersistAfter(c *pdk.Context) {
-	messageBatch := c.Packet.(*pluginproto.MessageBatch)
-	for _, message := range messageBatch.Messages {
+	for _, message := range c.Messages {
 		s.s.MakeIndex(message.ChannelId, uint8(message.ChannelType))
 	}
 }
 
 func (s Search) search(c *pdk.HttpContext) {
-
 	var req search.SearchReq
 	if err := c.BindJSON(&req); err != nil {
 		c.ResponseError(err)
@@ -96,6 +94,9 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 		return
 	}
 
+	reqBytes, _ := json.Marshal(req)
+	fmt.Println("usersearch-req----->", string(reqBytes))
+
 	if req.Uid == "" {
 		c.ResponseError(fmt.Errorf("uid is empty"))
 		return
@@ -103,6 +104,10 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 
 	if req.Limit <= 0 || req.Limit > 1000 {
 		req.Limit = 20
+	}
+
+	if strings.TrimSpace(req.ChannelId) != "" && req.ChannelType == wkproto.ChannelTypePerson {
+		req.ChannelId = pdk.GetFakeChannelIDWith(req.Uid, req.ChannelId)
 	}
 
 	// 获取用户的会话列表
@@ -144,6 +149,10 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 
 		channels := channelBelongNodeResp.Channels
 
+		if len(channels) == 0 {
+			continue
+		}
+
 		cloneReq := req.SearchReq.Clone()
 		cloneReq.Channels = channels
 
@@ -173,6 +182,13 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 				return err
 			}
 			messageLock.Lock()
+
+			// 个人频道替换成真实频道
+			for _, msg := range searchResp.Messages {
+				if msg.ChannelType == wkproto.ChannelTypePerson {
+					msg.ChannelId = getRealChannelId(req.Uid, msg.ChannelId)
+				}
+			}
 			messages = append(messages, searchResp.Messages...)
 			if searchResp.Cost > maxCost {
 				maxCost = searchResp.Cost
@@ -215,4 +231,15 @@ func parseUint64(str string) uint64 {
 	}
 	i, _ := strconv.ParseUint(str, 10, 64)
 	return i
+}
+
+func getRealChannelId(uid, channelId string) string {
+	uids := strings.Split(channelId, "@")
+	if len(uids) < 2 {
+		return channelId
+	}
+	if uids[0] == uid {
+		return uids[1]
+	}
+	return uids[0]
 }

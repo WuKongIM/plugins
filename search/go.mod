@@ -5,13 +5,13 @@ go 1.23.4
 toolchain go1.23.6
 
 require (
-	github.com/WuKongIM/go-pdk v0.0.0-20250215134324-de8299e18d5e
+	github.com/WuKongIM/WuKongIMGoProto v1.0.21
+	github.com/WuKongIM/go-pdk v0.0.0-20250315090541-55c1453bbed8
 	github.com/WuKongIM/wklog v0.0.0-20250123094253-32484fb54d05
 	github.com/blevesearch/bleve/v2 v2.4.4
 	github.com/cockroachdb/pebble v1.1.4
 	github.com/tidwall/gjson v1.18.0
-	github.com/ttys3/gojieba-bleve/v2 v2.1.0
-	github.com/yanyiwu/gojieba v1.4.5
+	github.com/vcaesar/gse-bleve v0.40.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.8.0
 )
@@ -72,7 +72,6 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/vcaesar/cedar v0.20.1 // indirect
-	github.com/vcaesar/gse-bleve v0.40.0 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
 	go.etcd.io/etcd/pkg/v3 v3.5.17 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
