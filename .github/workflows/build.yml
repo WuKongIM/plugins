@@ -29,29 +29,26 @@ jobs:
         uses: actions/setup-go@v3
         with:
           go-version: '1.23'
-
+      - name: Set GOOS and GOARCH
+        run: |
+          echo "GOOS=${{ matrix.os == 'ubuntu-latest' && 'linux' || 'darwin' }}" >> $GITHUB_ENV
+          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV    
       - name: Build ai-example
         working-directory: ./ai-example
         run: |
-          OS=$(go env GOOS)
-          ARCH=$(go env GOARCH)
-          BINARY_NAME="wk.plugin.ai-example-$OS-$ARCH.wkp"
+          BINARY_NAME="wk.plugin.ai-example-$GOOS-$GOARCH.wkp"
           go build -o $BINARY_NAME || exit 1
 
       - name: Build ai-volcengine
         working-directory: ./ai-volcengine
         run: |
-          OS=$(go env GOOS)
-          ARCH=$(go env GOARCH)
-          BINARY_NAME="wk.plugin.ai-volcengine-$OS-$ARCH.wkp"
+          BINARY_NAME="wk.plugin.ai-volcengine-$GOOS-$GOARCH.wkp"
           go build -o $BINARY_NAME || exit 1
 
       - name: Build search
         working-directory: ./search
         run: |
-          OS=$(go env GOOS)
-          ARCH=$(go env GOARCH)
-          BINARY_NAME="wk.plugin.search-$OS-$ARCH.wkp"
+          BINARY_NAME="wk.plugin.search-$GOOS-$GOARCH.wkp"
           go build -o $BINARY_NAME || exit 1
 
       - name: Upload Binaries
