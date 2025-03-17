@@ -9,9 +9,9 @@ import (
 	"go.uber.org/zap"
 )
 
-var pluginNo = "wk.plugin.aiexample" // 插件编号
-var Version = "0.0.1"                // 插件版本
-var Priority = int32(1)              // 插件优先级
+var pluginNo = "wk.plugin.ai-example" // 插件编号
+var Version = "0.0.1"                 // 插件版本
+var Priority = int32(1)               // 插件优先级
 
 func main() {
 	err := pdk.RunServer(New, pluginNo, pdk.WithVersion(Version), pdk.WithPriority(Priority))

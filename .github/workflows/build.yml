@@ -1,0 +1,62 @@
+name: Build and Upload Binaries
+
+on:
+  workflow_dispatch:
+  release:
+    types: [created]
+jobs:
+  build:
+    permissions:
+      id-token: write # To sign the provenance.
+      contents: write # To upload assets to release.
+      actions: read # To read the workflow path.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        arch:
+          - amd64
+          - arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.23'
+
+      - name: Build ai-example
+        working-directory: ./ai-example
+        run: |
+          OS=$(go env GOOS)
+          ARCH=$(go env GOARCH)
+          BINARY_NAME="wk.plugin.ai-example-$OS-$ARCH.wkp"
+          go build -o $BINARY_NAME || exit 1
+
+      - name: Build ai-volcengine
+        working-directory: ./ai-volcengine
+        run: |
+          OS=$(go env GOOS)
+          ARCH=$(go env GOARCH)
+          BINARY_NAME="wk.plugin.ai-volcengine-$OS-$ARCH.wkp"
+          go build -o $BINARY_NAME || exit 1
+
+      - name: Build search
+        working-directory: ./search
+        run: |
+          OS=$(go env GOOS)
+          ARCH=$(go env GOARCH)
+          BINARY_NAME="wk.plugin.search-$OS-$ARCH.wkp"
+          go build -o $BINARY_NAME || exit 1
+
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: go-binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ./ai-example/wk.plugin.ai-example-*
+            ./ai-volcengine/wk.plugin.ai-volcengine-*
+            ./search/wk.plugin.search-*
