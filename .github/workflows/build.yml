@@ -62,40 +62,24 @@ jobs:
             ./ai-example/wk.plugin.ai-example-*
             ./ai-volcengine/wk.plugin.ai-volcengine-*
             ./search/wk.plugin.search-*
-  create-release:
+  create-and-upload-release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
         with:
-          tag_name: ${{ github.ref_name }} # Use the pushed tag name
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          body_path: CHANGELOG.md       
-  upload-to-release:
-      needs: create-release
-      runs-on: ubuntu-latest
-      steps:
-        - name: Download Artifacts
-          uses: actions/download-artifact@v4
-          with:
-            path: ./artifacts
+          path: ./artifacts
 
-        - name: List Artifacts
-          run: |
-            ls -R ./artifacts
+      - name: List Artifacts
+        run: |
+          ls -R ./artifacts
 
-        - name: Upload to Release
-          uses: actions/upload-release-asset@v1
-          with:
-            upload_url: ${{ needs.create-release.outputs.upload_url }}
-            asset_path: ./artifacts/binaries-${{ matrix.os }}-${{ matrix.arch }}/*
-            asset_content_type: application/octet-stream
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            ./artifacts/binaries-*/*
