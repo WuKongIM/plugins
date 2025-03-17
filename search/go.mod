@@ -6,7 +6,7 @@ toolchain go1.23.6
 
 require (
 	github.com/WuKongIM/WuKongIMGoProto v1.0.21
-	github.com/WuKongIM/go-pdk v0.0.0-20250316095358-30bc62b7a349
+	github.com/WuKongIM/go-pdk v1.0.1-0.20250316115229-43138680104a
 	github.com/WuKongIM/wklog v0.0.0-20250123094253-32484fb54d05
 	github.com/blevesearch/bleve/v2 v2.4.4
 	github.com/cockroachdb/pebble v1.1.4
@@ -19,7 +19,7 @@ require (
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
 	github.com/RoaringBitmap/roaring v1.9.3 // indirect
-	github.com/WuKongIM/wkrpc v0.0.0-20250205151151-5e8a1f66fd54 // indirect
+	github.com/WuKongIM/wkrpc v0.0.0-20250312122115-5e44de72d2c8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect
 	github.com/blevesearch/bleve_index_api v1.1.12 // indirect
