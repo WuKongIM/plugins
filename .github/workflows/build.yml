@@ -53,7 +53,7 @@ jobs:
           go build -o $BINARY_NAME || exit 1
 
       - name: Upload Binaries
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: go-binaries-${{ matrix.os }}-${{ matrix.arch }}
           path: |
