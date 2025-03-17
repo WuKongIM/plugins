@@ -6,7 +6,7 @@ toolchain go1.23.6
 
 require (
 	github.com/WuKongIM/WuKongIMGoProto v1.0.21
-	github.com/WuKongIM/go-pdk v0.0.0-20250315090541-55c1453bbed8
+	github.com/WuKongIM/go-pdk v0.0.0-20250316095358-30bc62b7a349
 	github.com/WuKongIM/wklog v0.0.0-20250123094253-32484fb54d05
 	github.com/blevesearch/bleve/v2 v2.4.4
 	github.com/cockroachdb/pebble v1.1.4

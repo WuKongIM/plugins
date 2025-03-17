@@ -49,6 +49,8 @@ github.com/WuKongIM/go-pdk v0.0.0-20250315090229-20d75f3439e0 h1:b00UN5Ea8B1Wy9d
 github.com/WuKongIM/go-pdk v0.0.0-20250315090229-20d75f3439e0/go.mod h1:/SBQhQ7uGJZSRU6knV+pAP9KHfjDqmzNcrbT4DT8gYE=
 github.com/WuKongIM/go-pdk v0.0.0-20250315090541-55c1453bbed8 h1:aPr4MftBE/Clce35oCt4x7O5HgoyiUY2oPvsUjFNs5o=
 github.com/WuKongIM/go-pdk v0.0.0-20250315090541-55c1453bbed8/go.mod h1:/SBQhQ7uGJZSRU6knV+pAP9KHfjDqmzNcrbT4DT8gYE=
+github.com/WuKongIM/go-pdk v0.0.0-20250316095358-30bc62b7a349 h1:6pC/NBZJPER5gv5uu+z2qY8jiZfj340zTQ5Y6FgQxSE=
+github.com/WuKongIM/go-pdk v0.0.0-20250316095358-30bc62b7a349/go.mod h1:/SBQhQ7uGJZSRU6knV+pAP9KHfjDqmzNcrbT4DT8gYE=
 github.com/WuKongIM/wklog v0.0.0-20250123094253-32484fb54d05 h1:z6Zu0VFnXA/+IcNAI/G0QgvIZZlU4aF6pf/fPP780hY=
 github.com/WuKongIM/wklog v0.0.0-20250123094253-32484fb54d05/go.mod h1:/juNjLcqcoW/NkNi4rxnhDvDAUo76w3qIZ4dgLkZvH0=
 github.com/WuKongIM/wkrpc v0.0.0-20250205151151-5e8a1f66fd54 h1:JaMGz0VbB49bOYKIfRTZeHKSCOREuKryDhG3eSNMVRM=
