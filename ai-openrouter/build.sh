@@ -5,7 +5,7 @@ PLUGIN_NAME="ai-openrouter"
 VERSION="1.0.0"
 
 # 定义目标平台
-PLATFORMS=("linux/arm64" "linux/amd64")
+PLATFORMS=("linux/arm64" "linux/amd64" "darwin/amd64" "darwin/arm64")
 
 # 创建输出目录
 OUTPUT_DIR="build"
@@ -17,7 +17,11 @@ for PLATFORM in "${PLATFORMS[@]}"; do
   IFS='/' read -r GOOS GOARCH <<< "$PLATFORM"
 
   # 设置输出文件名
-  OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}.wkp"
+  if [[ "$GOOS" == "windows" ]]; then
+    OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}.exe"
+  else
+    OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}"
+  fi
 
   echo "正在编译 Go 代码: $GOOS/$GOARCH..."
   GOOS="$GOOS" GOARCH="$GOARCH" go build -o "$OUTPUT_FILE" main.go
