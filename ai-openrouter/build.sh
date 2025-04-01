@@ -3,10 +3,31 @@
 # 设置变量
 PLUGIN_NAME="ai-openrouter"
 VERSION="1.0.0"
-OUTPUT_FILE="${PLUGIN_NAME}-${VERSION}.wkp"
+
+# 定义目标平台
+PLATFORMS=("linux/arm64" "linux/amd64")
+
+# 创建输出目录
+OUTPUT_DIR="build"
+mkdir -p "$OUTPUT_DIR"
 
 # 编译 Go 代码
-echo "正在编译 Go 代码..."
-GOOS=linux GOARCH=arm64 go build -o "${OUTPUT_FILE}" main.go
+for PLATFORM in "${PLATFORMS[@]}"; do
+  # 解析平台信息
+  IFS='/' read -r GOOS GOARCH <<< "$PLATFORM"
 
-echo "打包完成: ${OUTPUT_FILE}" 
+  # 设置输出文件名
+  OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}.wkp"
+
+  echo "正在编译 Go 代码: $GOOS/$GOARCH..."
+  GOOS="$GOOS" GOARCH="$GOARCH" go build -o "$OUTPUT_FILE" main.go
+
+  if [ $? -eq 0 ]; then
+    echo "打包完成: $OUTPUT_FILE"
+  else
+    echo "编译失败: $GOOS/$GOARCH"
+    exit 1
+  fi
+done
+
+echo "所有平台的编译已完成！"
