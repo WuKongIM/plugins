@@ -20,7 +20,7 @@ for PLATFORM in "${PLATFORMS[@]}"; do
   if [[ "$GOOS" == "windows" ]]; then
     OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}.exe"
   else
-    OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}"
+    OUTPUT_FILE="${OUTPUT_DIR}/${PLUGIN_NAME}-${VERSION}-${GOOS}-${GOARCH}.wkp"
   fi
 
   echo "正在编译 Go 代码: $GOOS/$GOARCH..."
