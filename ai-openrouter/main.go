@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+
+	"bufio"
 
 	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/WuKongIM/wklog"
@@ -50,6 +53,7 @@ func (r *Robot) ConfigUpdate() {
 type OpenRouterRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream"`
 }
 
 type Message struct {
@@ -106,6 +110,7 @@ func (r *Robot) Receive(c *pdk.Context) {
 				Content: content,
 			},
 		},
+		Stream: true,
 	}
 
 	// 将请求体转换为 JSON
@@ -150,37 +155,61 @@ func (r *Robot) Receive(c *pdk.Context) {
 	}
 	defer resp.Body.Close()
 
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		r.Error("read response error:", zap.Error(err))
+	// 处理流式响应
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		r.Error("API error:", zap.String("status", resp.Status), zap.String("body", string(body)))
 		return
 	}
 
-	// 解析响应
-	var openRouterResp OpenRouterResponse
-	err = json.Unmarshal(body, &openRouterResp)
-	if err != nil {
-		r.Error("unmarshal response error:", zap.Error(err))
-		return
-	}
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			r.Error("read stream error:", zap.Error(err))
+			return
+		}
 
-	// 处理响应
-	if len(openRouterResp.Choices) > 0 {
-		responseContent := openRouterResp.Choices[0].Message.Content
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 
-		// 发送完整响应
-		data, _ := json.Marshal(map[string]interface{}{
-			"type":    1,
-			"content": responseContent,
-		})
-		imstream.Write(data)
-	} else {
-		// 没有响应
-		data, _ := json.Marshal(map[string]interface{}{
-			"type":    1,
-			"content": "抱歉，未能获取到回复。",
-		})
-		imstream.Write(data)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var streamResponse struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+
+		if err := json.Unmarshal([]byte(data), &streamResponse); err != nil {
+			r.Error("unmarshal stream data error:", zap.Error(err), zap.String("data", data))
+			continue
+		}
+
+		if len(streamResponse.Choices) > 0 {
+			content := streamResponse.Choices[0].Delta.Content
+			if content != "" {
+				fmt.Print(content)
+				streamData, _ := json.Marshal(map[string]interface{}{
+					"type":    1,
+					"content": content,
+				})
+				imstream.Write(streamData)
+			}
+		}
 	}
 }
