@@ -27,6 +27,8 @@ type Config struct {
 	RedisAddr string        `json:"redis_addr" label:"Redis Address"`
 	RedisPass pdk.SecretKey `json:"redis_pass" label:"Redis Password"`
 	RedisDB   int           `json:"redis_db" label:"Redis DB Index"`
+	//敏感词 redis key
+	RedisKey string `json:"redis_key" label:"SensitiveWords Redis Key"`
 }
 
 type Robot struct {
@@ -90,7 +92,7 @@ func (r *Robot) Send(c *pdk.Context) {
 	}
 
 	// 检查是否包含敏感词
-	sensitiveWords, err := r.redisClient.SMembers(r.ctx, "sensitive_words").Result()
+	sensitiveWords, err := r.redisClient.SMembers(r.ctx, r.Config.RedisKey).Result()
 	if err != nil {
 		r.Error("Failed to get sensitive words from Redis", zap.Error(err))
 		return
@@ -145,7 +147,7 @@ func (r *Robot) Receive(c *pdk.Context) {
 
 	// 检查Redis中是否已存在该内容
 	// 使用 "tg_messages:{channelId}" 作为集合名来存储不同群组的消息
-	redisKey := "sensitive_words"
+	redisKey := r.Config.RedisKey
 
 	exists, err := r.redisClient.SIsMember(r.ctx, redisKey, content).Result()
 	if err != nil {
