@@ -91,7 +91,8 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 	docMapping.AddFieldMappingsAt("topic", topicFieldMapping)
 
 	// payload
-	payloadFieldMapping := gse.NewDoc()
+	payloadFieldMapping := bleve.NewDocumentMapping()
+	payloadFieldMapping.Dynamic = true
 
 	// payload.content
 	contentFieldMapping := gse.NewTextMap()
@@ -104,11 +105,22 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 
 	docMapping.AddSubDocumentMapping("payload", payloadFieldMapping)
 
+	// payload_json 原样的数据
+	payloadJsonFieldMapping := bleve.NewTextFieldMapping()
+	payloadJsonFieldMapping.Index = false
+	payloadJsonFieldMapping.Store = true
+	docMapping.AddFieldMappingsAt("payload_json", payloadJsonFieldMapping)
+
 	return indexMapping
 
 }
 
 func (s *Search) Search(req SearchReq) (*SearchResp, error) {
+
+	if s.msgIndex == nil {
+		fmt.Println("search: msgIndex is nil")
+		return nil, nil
+	}
 
 	query := bleve.NewConjunctionQuery()
 	if strings.TrimSpace(req.FromUid) != "" {
@@ -243,7 +255,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 
 	resultMsgs := make([]*Message, 0, len(searchResult.Hits))
 	for _, hit := range searchResult.Hits {
-
+		fmt.Println(hit.ID, hit.Fields, hit.Fragments)
 		msgId, _ := strconv.ParseInt(hit.ID, 10, 64)
 		var (
 			messageSeq  uint64
@@ -253,7 +265,6 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			channelType uint8
 			streamNo    string
 			streamId    uint64
-			payload     interface{}
 			topic       string
 			timestamp   uint32
 		)
@@ -300,36 +311,6 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			streamId = uint64(streamSeqObj.(float64))
 		}
 
-		// payload
-		var payloadMap map[string]interface{}
-		for fieldKey, fieldValue := range hit.Fields {
-			if fieldValue == nil {
-				continue
-			}
-			if strings.HasPrefix(fieldKey, "payload.") {
-				if payloadMap == nil {
-					payloadMap = make(map[string]interface{})
-				}
-				key := strings.TrimPrefix(fieldKey, "payload.")
-				payloadMap[key] = fieldValue
-			}
-
-		}
-
-		if len(payloadMap) > 0 {
-			payload = payloadMap
-
-			// 如果有高亮内容，替换payload原来的值
-			if len(hit.Fragments) > 0 {
-				for k, v := range hit.Fragments {
-					if strings.HasPrefix(k, "payload.") {
-						key := strings.TrimPrefix(k, "payload.")
-						payloadMap[key] = strings.Join(v, "")
-					}
-				}
-			}
-		}
-
 		// topic
 		topicObj := hit.Fields["topic"]
 		if topicObj != nil {
@@ -343,9 +324,24 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 		}
 
 		var payloadBytes []byte
+		var payloadJsonStr string
+		var payloadMap map[string]interface{}
+		if hit.Fields["payload_json"] != nil {
+			payloadJsonStr = hit.Fields["payload_json"].(string)
+			payloadMap = gjson.Parse(payloadJsonStr).Value().(map[string]interface{})
+		}
 
-		if payload != nil {
-			payloadBytes, _ = json.Marshal(payload)
+		if len(payloadMap) > 0 {
+			// 如果有高亮内容，替换payload原来的值
+			if len(hit.Fragments) > 0 {
+				for k, v := range hit.Fragments {
+					if strings.HasPrefix(k, "payload.") {
+						key := strings.TrimPrefix(k, "payload.")
+						payloadMap[key] = strings.Join(v, "")
+					}
+				}
+			}
+			payloadBytes, _ = json.Marshal(payloadMap)
 		}
 
 		msg := &Message{
@@ -359,7 +355,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			StreamNo:     streamNo,
 			StreamId:     streamId,
 			Payload:      payloadBytes,
-			PayloadJson:  payload,
+			PayloadJson:  payloadJsonStr,
 			Topic:        topic,
 			Timestamp:    timestamp,
 		}
@@ -375,14 +371,43 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 	}, nil
 }
 
-func (s *Search) Start() {
-	var err error
+func buildNestedPayload(fields map[string]interface{}) map[string]interface{} {
+	payloadMap := make(map[string]interface{})
+	for fieldKey, fieldValue := range fields {
+		if fieldValue == nil {
+			continue
+		}
+		if strings.HasPrefix(fieldKey, "payload.") {
+			key := strings.TrimPrefix(fieldKey, "payload.")
+			keys := strings.Split(key, ".") // 分割 key 为层级结构
+			currentMap := payloadMap
+			for i, k := range keys {
+				if i == len(keys)-1 {
+					// 最后一层，赋值
+					currentMap[k] = fieldValue
+				} else {
+					// 中间层，确保存在嵌套 map
+					if _, exists := currentMap[k]; !exists {
+						currentMap[k] = make(map[string]interface{})
+					}
+					currentMap = currentMap[k].(map[string]interface{})
+				}
+			}
+		}
+	}
+	return payloadMap
+}
 
+func (s *Search) Start() {
+	s.initDb()
+}
+
+func (s *Search) initDb() {
+	var err error
 	err = s.db.open()
 	if err != nil {
 		panic(err)
 	}
-
 	bleveDir := path.Join(pdk.S.SandboxDir(), "message.bleve")
 	s.msgIndex, err = bleve.Open(bleveDir)
 	if err != nil {
@@ -448,7 +473,7 @@ type Message struct {
 	ChannelId    string  `json:"channel_id,omitempty"`    // 频道ID
 	ChannelType  uint8   `json:"channel_type,omitempty"`  // 频道类型
 	Payload      Payload `json:"payload,omitempty"`       // 消息内容
-	PayloadJson  Payload `json:"payload_json,omitempty"`  // 消息内容 json形式
+	PayloadJson  string  `json:"payload_json,omitempty"`  // 消息内容 json形式
 	StreamNo     string  `json:"stream_no,omitempty"`     // 流编号
 	StreamId     uint64  `json:"stream_id,omitempty"`     // 流id
 	Topic        string  `json:"topic,omitempty"`         // 消息主题
@@ -468,6 +493,7 @@ func newMessageFrom(m *pluginproto.Message) *Message {
 		ChannelId:    m.ChannelId,
 		ChannelType:  uint8(m.ChannelType),
 		Payload:      jsonObj,
+		PayloadJson:  string(m.Payload),
 		StreamNo:     m.StreamNo,
 		StreamId:     m.StreamId,
 		Topic:        m.Topic,

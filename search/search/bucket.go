@@ -120,7 +120,10 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 }
 
 func (b *bucket) buildIndex(channelId string, channelType uint8, msgs []*pluginproto.Message) error {
-
+	if b.s.msgIndex == nil {
+		b.Error("search: msg index is nil", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
+		return nil
+	}
 	batch := b.s.msgIndex.NewBatch()
 	for _, msg := range msgs {
 		if gjson.ValidBytes(msg.Payload) {

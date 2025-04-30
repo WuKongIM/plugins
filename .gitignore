@@ -47,3 +47,7 @@ external_ip.txt
 wukongim.pid
 
 .DS_Store
+
+*.wkp
+
+build/
