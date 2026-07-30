@@ -9,22 +9,26 @@ import (
 
 	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
+	"github.com/WuKongIM/wklog"
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/tidwall/gjson"
 	gse "github.com/vcaesar/gse-bleve"
+	"go.uber.org/zap"
 )
 
 type Search struct {
 	buckets  []*bucket
 	db       *db
 	msgIndex bleve.Index
+	wklog.Log
 }
 
 func New() *Search {
 	s := &Search{
 		buckets: make([]*bucket, 10),
 		db:      newDb(),
+		Log:     wklog.NewWKLog("search"),
 	}
 
 	for i := 0; i < len(s.buckets); i++ {
@@ -37,11 +41,44 @@ func New() *Search {
 
 // 索引频道的消息
 func (s *Search) MakeIndex(channelId string, channelType uint8) {
+	// 参数校验
+	if strings.TrimSpace(channelId) == "" {
+		s.Warn("MakeIndex: channelId is empty, skip indexing")
+		return
+	}
+
+	// 检查 buckets 是否初始化
+	if len(s.buckets) == 0 {
+		s.Error("MakeIndex: buckets not initialized", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
+		return
+	}
+
 	bucketIndex := s.bucketIndex(channelId)
+	if bucketIndex < 0 || bucketIndex >= len(s.buckets) {
+		s.Error("MakeIndex: invalid bucket index", zap.Int("bucketIndex", bucketIndex), zap.String("channelId", channelId))
+		return
+	}
+
 	bucket := s.buckets[bucketIndex]
-	bucket.indexChan <- indexReq{
+	if bucket == nil {
+		s.Error("MakeIndex: bucket is nil", zap.Int("bucketIndex", bucketIndex), zap.String("channelId", channelId))
+		return
+	}
+
+	if bucket.indexChan == nil {
+		s.Error("MakeIndex: bucket indexChan is nil", zap.Int("bucketIndex", bucketIndex), zap.String("channelId", channelId))
+		return
+	}
+
+	// 使用非阻塞写入，避免 channel 满时阻塞调用方
+	select {
+	case bucket.indexChan <- indexReq{
 		channelId:   channelId,
 		channelType: channelType,
+	}:
+		s.Info("MakeIndex: index request queued", zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int("bucketIndex", bucketIndex))
+	default:
+		s.Warn("MakeIndex: index channel full, request dropped", zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int("bucketIndex", bucketIndex), zap.Int("chanLen", len(bucket.indexChan)))
 	}
 }
 
@@ -255,7 +292,6 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 
 	resultMsgs := make([]*Message, 0, len(searchResult.Hits))
 	for _, hit := range searchResult.Hits {
-		fmt.Println(hit.ID, hit.Fields, hit.Fragments)
 		msgId, _ := strconv.ParseInt(hit.ID, 10, 64)
 		var (
 			messageSeq  uint64
@@ -358,6 +394,7 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			PayloadJson:  payloadJsonStr,
 			Topic:        topic,
 			Timestamp:    timestamp,
+			Score:        hit.Score,
 		}
 
 		resultMsgs = append(resultMsgs, msg)
@@ -478,6 +515,7 @@ type Message struct {
 	StreamId     uint64  `json:"stream_id,omitempty"`     // 流id
 	Topic        string  `json:"topic,omitempty"`         // 消息主题
 	Timestamp    uint32  `json:"timestamp,omitempty"`     // 时间戳
+	Score        float64 `json:"score"`                   // 相关度分数
 }
 
 func newMessageFrom(m *pluginproto.Message) *Message {

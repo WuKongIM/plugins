@@ -15,6 +15,7 @@ import (
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
 	"github.com/WuKongIM/plugins/search/search"
 	"github.com/WuKongIM/wklog"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -58,6 +59,9 @@ func (s Search) Route(r *pdk.Route) {
 
 // PersistAfter 持久化消息后，更新索引
 func (s Search) PersistAfter(c *pdk.Context) {
+	if len(c.Messages) > 0 {
+		s.Info("PersistAfter: updating index", zap.Int("message_count", len(c.Messages)))
+	}
 	for _, message := range c.Messages {
 		s.s.MakeIndex(message.ChannelId, uint8(message.ChannelType))
 	}
@@ -113,6 +117,7 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 		return
 	}
 	if len(conversationChannelResp.Channels) == 0 {
+		fmt.Println("conversationChannelResp.Channels is empty........")
 		c.JSON(http.StatusOK, search.SearchResp{
 			Messages: []*search.Message{},
 		})
@@ -120,6 +125,8 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 	}
 
 	channels := conversationChannelResp.Channels
+
+	fmt.Println("conversationChannelResp.Channels--->", conversationChannelResp.Channels)
 
 	// 获取频道所属节点
 	channelBelogNodeBatchResp, err := pdk.S.ClusterChannelBelongNode(&pluginproto.ClusterChannelBelongNodeReq{
@@ -148,9 +155,12 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 		if len(channels) == 0 {
 			continue
 		}
+		fmt.Println("nodeId--->", nodeId, "channels--->", channels)
 
 		cloneReq := req.SearchReq.Clone()
 		cloneReq.Channels = channels
+		// 每个节点返回更多数据，聚合后再截取，避免因节点间 Score 不可比而丢失最相关的结果
+		cloneReq.Limit = req.Limit * len(channelBelongNodeResps)
 
 		bodyData, _ := json.Marshal(cloneReq)
 
@@ -169,13 +179,15 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 				},
 			})
 			if err != nil {
-				return err
+				s.Error("forward http error", zap.Error(err), zap.Uint64("nodeId", nodeId))
+				return fmt.Errorf("forward http error: %w", err)
 			}
 
 			searchResp := &search.SearchResp{}
 			err = json.Unmarshal(resp.Body, searchResp)
 			if err != nil {
-				return err
+				s.Error("unmarshal search resp error", zap.Error(err), zap.Uint64("nodeId", nodeId))
+				return fmt.Errorf("unmarshal search resp error: %w", err)
 			}
 			messageLock.Lock()
 
@@ -204,6 +216,9 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 	}
 
 	sort.Slice(messages, func(i, j int) bool {
+		if messages[i].Score != messages[j].Score {
+			return messages[i].Score > messages[j].Score
+		}
 		return messages[i].Timestamp > messages[j].Timestamp
 	})
 
