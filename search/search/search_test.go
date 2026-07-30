@@ -186,3 +186,61 @@ func TestSearchLimitAndRelevance(t *testing.T) {
 		t.Errorf("expected third message to be ID 6 (same score as 3-5 but newer), got ID %d", resp.Messages[2].MessageId)
 	}
 }
+
+func TestSearchFindsASCIIContentBySubstring(t *testing.T) {
+	s := &Search{
+		buckets: make([]*bucket, 0),
+	}
+
+	indexDir := path.Join(t.TempDir(), "substring.bleve")
+	indexMapping := s.buildMessageMapping("substring.bleve")
+	index, err := bleve.New(indexDir, indexMapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.msgIndex = index
+	defer index.Close()
+
+	msgs := []*pluginproto.Message{
+		{MessageId: 1, Payload: []byte(`{"content": "web.botgate.cn", "type": 1}`)},
+		{MessageId: 2, Payload: []byte(`{"content": "联系电话 15900000001", "type": 1}`)},
+	}
+	batch := index.NewBatch()
+	for _, msg := range msgs {
+		if err := batch.Index(fmt.Sprintf("%d", msg.MessageId), newMessageFrom(msg)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := index.Batch(batch); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		keyword   string
+		messageID int64
+	}{
+		{name: "domain prefix", keyword: "bot", messageID: 1},
+		{name: "domain middle", keyword: "otg", messageID: 1},
+		{name: "domain full token", keyword: "botgate", messageID: 1},
+		{name: "phone middle", keyword: "900", messageID: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := s.Search(SearchReq{
+				Payload: map[string]string{"content": tt.keyword},
+				Limit:   10,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(resp.Messages) != 1 {
+				t.Fatalf("search %q: expected 1 message, got %d", tt.keyword, len(resp.Messages))
+			}
+			if resp.Messages[0].MessageId != tt.messageID {
+				t.Errorf("search %q: expected message %d, got %d", tt.keyword, tt.messageID, resp.Messages[0].MessageId)
+			}
+		})
+	}
+}

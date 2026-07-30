@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
+
+var errChannelIndexIterationLimit = errors.New("channel indexing reached iteration limit")
 
 type bucket struct {
 	id        int
@@ -73,12 +76,12 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 
 	// 对每个频道单独处理，避免一个频道的问题影响其他频道
 	for _, indexReq := range uniqueReqs {
-		b.processChannelIndex(indexReq.channelId, indexReq.channelType)
+		_ = b.processChannelIndex(indexReq.channelId, indexReq.channelType)
 	}
 }
 
 // processChannelIndex 处理单个频道的索引，内部循环直到索引完成
-func (b *bucket) processChannelIndex(channelId string, channelType uint8) {
+func (b *bucket) processChannelIndex(channelId string, channelType uint8) error {
 	const maxIterations = 100 // 防止无限循环
 	const limit = 500
 
@@ -86,7 +89,7 @@ func (b *bucket) processChannelIndex(channelId string, channelType uint8) {
 		msgSeq, err := b.s.db.getChannelMaxMessageSeq(channelId, channelType)
 		if err != nil {
 			b.Error("getChannelMaxMessageSeq error", zap.Error(err), zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
-			return
+			return err
 		}
 
 		req := &pluginproto.ChannelMessageBatchReq{
@@ -104,37 +107,42 @@ func (b *bucket) processChannelIndex(channelId string, channelType uint8) {
 		messageResp, err := b.fetchMessagesWithTimeout(req, 30*time.Second)
 		if err != nil {
 			b.Error("get channel message error", zap.Error(err), zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
-			return
+			return err
 		}
 
 		if messageResp == nil || len(messageResp.ChannelMessageResps) == 0 {
 			b.Info("channel message is empty, indexing complete", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
-			return
+			return nil
 		}
 
 		resp := messageResp.ChannelMessageResps[0]
 		if len(resp.Messages) == 0 {
 			b.Info("no new messages, indexing complete", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
-			return
+			return nil
+		}
+
+		lastMsg := resp.Messages[len(resp.Messages)-1]
+		if lastMsg.MessageSeq <= msgSeq {
+			return fmt.Errorf("channel message sequence did not advance: channel_id=%s channel_type=%d current_seq=%d last_seq=%d", channelId, channelType, msgSeq, lastMsg.MessageSeq)
 		}
 
 		// 索引消息
 		err = b.buildIndex(resp.ChannelId, uint8(resp.ChannelType), resp.Messages)
 		if err != nil {
 			b.Error("search index error", zap.Error(err), zap.String("channelId", resp.ChannelId), zap.Uint32("channelType", resp.ChannelType))
-			return
+			return err
 		}
 
-		lastMsg := resp.Messages[len(resp.Messages)-1]
 		err = b.s.db.setChannelMaxMessageSeq(resp.ChannelId, uint8(resp.ChannelType), lastMsg.MessageSeq)
 		if err != nil {
 			b.Error("set channel max message seq error", zap.Error(err), zap.String("channelId", resp.ChannelId), zap.Uint32("channelType", resp.ChannelType), zap.Uint64("messageSeq", lastMsg.MessageSeq))
+			return err
 		}
 
 		// 如果消息数量小于 limit，说明已经索引完成
 		if len(resp.Messages) < limit {
 			b.Info("channel indexing complete", zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int("iteration", i+1))
-			return
+			return nil
 		}
 
 		// 还有更多消息，短暂休眠后继续
@@ -142,6 +150,7 @@ func (b *bucket) processChannelIndex(channelId string, channelType uint8) {
 	}
 
 	b.Warn("channel indexing reached max iterations", zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int("maxIterations", maxIterations))
+	return fmt.Errorf("%w: channel_id=%s channel_type=%d", errChannelIndexIterationLimit, channelId, channelType)
 }
 
 // fetchMessagesWithTimeout 带超时的消息获取

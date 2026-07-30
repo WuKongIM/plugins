@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"path"
+	"strconv"
+	"strings"
 
 	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/cockroachdb/pebble"
@@ -75,18 +77,18 @@ func (d *db) defaultPebbleOptions() *pebble.Options {
 // 设置频道已同步的最大消息序号
 func (d *db) setChannelMaxMessageSeq(channelId string, channelType uint8, messageSeq uint64) error {
 
-	key := fmt.Sprintf("%s%s:%d", d.channelMsgMaxSeqPrefix, channelId, channelType)
+	key := d.channelMaxMessageSeqKey(channelId, channelType)
 
 	var buf = make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, messageSeq)
-	return d.pebbleDb.Set([]byte(key), buf, pebble.Sync)
+	return d.pebbleDb.Set(key, buf, pebble.Sync)
 }
 
 // 获取频道已同步的最大消息序号
 func (d *db) getChannelMaxMessageSeq(channelId string, channelType uint8) (uint64, error) {
-	key := fmt.Sprintf("%s%s:%d", d.channelMsgMaxSeqPrefix, channelId, channelType)
+	key := d.channelMaxMessageSeqKey(channelId, channelType)
 
-	data, closer, err := d.pebbleDb.Get([]byte(key))
+	data, closer, err := d.pebbleDb.Get(key)
 	if closer != nil {
 		defer closer.Close()
 	}
@@ -98,4 +100,71 @@ func (d *db) getChannelMaxMessageSeq(channelId string, channelType uint8) (uint6
 	}
 
 	return binary.BigEndian.Uint64(data), nil
+}
+
+func (d *db) indexedChannels() ([]Channel, error) {
+	prefix := []byte(d.channelMsgMaxSeqPrefix)
+	iter, err := d.pebbleDb.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: prefixUpperBound(prefix),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	channels := make([]Channel, 0)
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := strings.TrimPrefix(string(iter.Key()), d.channelMsgMaxSeqPrefix)
+		separatorIndex := strings.LastIndexByte(key, ':')
+		if separatorIndex <= 0 || separatorIndex == len(key)-1 {
+			continue
+		}
+
+		channelType, err := strconv.ParseUint(key[separatorIndex+1:], 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("parse channel type from index state key %q: %w", string(iter.Key()), err)
+		}
+		channels = append(channels, Channel{
+			ChannelId:   key[:separatorIndex],
+			ChannelType: uint8(channelType),
+		})
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	return channels, nil
+}
+
+func (d *db) resetChannelMaxMessageSeq(channels []Channel) error {
+	if len(channels) == 0 {
+		return nil
+	}
+
+	batch := d.pebbleDb.NewBatch()
+	defer batch.Close()
+
+	var zero [8]byte
+	for _, channel := range channels {
+		key := d.channelMaxMessageSeqKey(channel.ChannelId, channel.ChannelType)
+		if err := batch.Set(key, zero[:], nil); err != nil {
+			return err
+		}
+	}
+	return d.pebbleDb.Apply(batch, pebble.Sync)
+}
+
+func (d *db) channelMaxMessageSeqKey(channelId string, channelType uint8) []byte {
+	return []byte(fmt.Sprintf("%s%s:%d", d.channelMsgMaxSeqPrefix, channelId, channelType))
+}
+
+func prefixUpperBound(prefix []byte) []byte {
+	upperBound := append([]byte(nil), prefix...)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		if upperBound[i] < 0xff {
+			upperBound[i]++
+			return upperBound[:i+1]
+		}
+	}
+	return nil
 }

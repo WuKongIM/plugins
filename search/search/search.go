@@ -2,19 +2,41 @@ package search
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
 	"github.com/WuKongIM/wklog"
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
+	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
+	"github.com/blevesearch/bleve/v2/analysis/token/ngram"
+	"github.com/blevesearch/bleve/v2/analysis/tokenizer/whitespace"
 	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/tidwall/gjson"
 	gse "github.com/vcaesar/gse-bleve"
 	"go.uber.org/zap"
+)
+
+const (
+	contentSubstringField       = "content_substrings"
+	contentSubstringAnalyzer    = "content_substring"
+	contentSubstringTokenFilter = "content_substring_ngram"
+	contentSubstringMinLength   = 3
+	contentSubstringMaxLength   = 64
+	contentSubstringQueryBoost  = 0.2
+
+	messageIndexDirectory      = "message-v2.bleve"
+	messageIndexSchemaKey      = "search.schema_version"
+	messageIndexSchemaVersion  = "2"
+	messageIndexMigrationKey   = "search.migration_state"
+	messageIndexMigrationReset = "reset"
+	messageIndexMigrationReady = "ready"
 )
 
 type Search struct {
@@ -96,6 +118,22 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 	if err != nil {
 		panic(err)
 	}
+	err = indexMapping.AddCustomTokenFilter(contentSubstringTokenFilter, map[string]interface{}{
+		"type": ngram.Name,
+		"min":  contentSubstringMinLength,
+		"max":  contentSubstringMaxLength,
+	})
+	if err != nil {
+		panic(err)
+	}
+	err = indexMapping.AddCustomAnalyzer(contentSubstringAnalyzer, map[string]interface{}{
+		"type":          custom.Name,
+		"tokenizer":     whitespace.Name,
+		"token_filters": []string{lowercase.Name, contentSubstringTokenFilter},
+	})
+	if err != nil {
+		panic(err)
+	}
 
 	// 创建一个文档映射
 	docMapping := bleve.NewDocumentMapping()
@@ -141,6 +179,13 @@ func (s *Search) buildMessageMapping(indexName string) *mapping.IndexMappingImpl
 	payloadFieldMapping.AddFieldMappingsAt("type", typeFieldMapping)
 
 	docMapping.AddSubDocumentMapping("payload", payloadFieldMapping)
+
+	contentSubstringFieldMapping := bleve.NewTextFieldMapping()
+	contentSubstringFieldMapping.Analyzer = contentSubstringAnalyzer
+	contentSubstringFieldMapping.Store = false
+	contentSubstringFieldMapping.IncludeInAll = false
+	contentSubstringFieldMapping.DocValues = false
+	docMapping.AddFieldMappingsAt(contentSubstringField, contentSubstringFieldMapping)
 
 	// payload_json 原样的数据
 	payloadJsonFieldMapping := bleve.NewTextFieldMapping()
@@ -218,7 +263,20 @@ func (s *Search) Search(req SearchReq) (*SearchResp, error) {
 			exist = true
 			bleveQuery := bleve.NewMatchQuery(v)
 			bleveQuery.SetField(fmt.Sprintf("payload.%s", k))
-			payloadQuery.AddQuery(bleveQuery)
+
+			fieldQuery := bleve.NewDisjunctionQuery(bleveQuery)
+			if k == "content" {
+				for _, term := range asciiSearchTerms(v) {
+					if len(term) < contentSubstringMinLength || len(term) > contentSubstringMaxLength {
+						continue
+					}
+					substringQuery := bleve.NewTermQuery(term)
+					substringQuery.SetField(contentSubstringField)
+					substringQuery.SetBoost(contentSubstringQueryBoost)
+					fieldQuery.AddQuery(substringQuery)
+				}
+			}
+			payloadQuery.AddQuery(fieldQuery)
 		}
 		if exist {
 			query.AddQuery(payloadQuery)
@@ -440,22 +498,114 @@ func (s *Search) Start() {
 }
 
 func (s *Search) initDb() {
-	var err error
-	err = s.db.open()
-	if err != nil {
+	if err := s.db.open(); err != nil {
 		panic(err)
 	}
-	bleveDir := path.Join(pdk.S.SandboxDir(), "message.bleve")
-	s.msgIndex, err = bleve.Open(bleveDir)
+
+	bleveDir := path.Join(pdk.S.SandboxDir(), messageIndexDirectory)
+	index, err := bleve.Open(bleveDir)
 	if err != nil {
 		if err == bleve.ErrorIndexPathDoesNotExist {
-
-			s.msgIndex, err = bleve.New(bleveDir, s.buildMessageMapping("message.bleve"))
+			index, err = bleve.New(bleveDir, s.buildMessageMapping(messageIndexDirectory))
 			if err != nil {
 				panic(err)
 			}
+			if err := index.SetInternal([]byte(messageIndexSchemaKey), []byte(messageIndexSchemaVersion)); err != nil {
+				index.Close()
+				panic(err)
+			}
+		} else {
+			panic(err)
 		}
 	}
+	s.msgIndex = index
+
+	schemaVersion, err := s.msgIndex.GetInternal([]byte(messageIndexSchemaKey))
+	if err != nil {
+		panic(err)
+	}
+	if string(schemaVersion) != messageIndexSchemaVersion {
+		panic(fmt.Errorf("unsupported message index schema version %q in %s", string(schemaVersion), bleveDir))
+	}
+
+	migrationState, err := s.msgIndex.GetInternal([]byte(messageIndexMigrationKey))
+	if err != nil {
+		panic(err)
+	}
+	if string(migrationState) == messageIndexMigrationReady {
+		return
+	}
+
+	channels, err := s.db.indexedChannels()
+	if err != nil {
+		panic(err)
+	}
+	if string(migrationState) != messageIndexMigrationReset {
+		if err := s.db.resetChannelMaxMessageSeq(channels); err != nil {
+			panic(err)
+		}
+		if err := s.msgIndex.SetInternal([]byte(messageIndexMigrationKey), []byte(messageIndexMigrationReset)); err != nil {
+			panic(err)
+		}
+	}
+
+	if len(channels) == 0 {
+		if err := s.msgIndex.SetInternal([]byte(messageIndexMigrationKey), []byte(messageIndexMigrationReady)); err != nil {
+			panic(err)
+		}
+		return
+	}
+	if err := s.rebuildMessageIndex(channels); err != nil {
+		panic(err)
+	}
+}
+
+func (s *Search) rebuildMessageIndex(channels []Channel) error {
+	channelGroups := make([][]Channel, len(s.buckets))
+	for _, channel := range channels {
+		bucketIndex := s.bucketIndex(channel.ChannelId)
+		channelGroups[bucketIndex] = append(channelGroups[bucketIndex], channel)
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(channels))
+	for bucketIndex, channels := range channelGroups {
+		if len(channels) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(b *bucket, channels []Channel) {
+			defer wg.Done()
+			for _, channel := range channels {
+				for {
+					err := b.processChannelIndex(channel.ChannelId, channel.ChannelType)
+					if errors.Is(err, errChannelIndexIterationLimit) {
+						continue
+					}
+					if err != nil {
+						errChan <- fmt.Errorf("rebuild channel %s:%d: %w", channel.ChannelId, channel.ChannelType, err)
+					}
+					break
+				}
+			}
+		}(s.buckets[bucketIndex], channels)
+	}
+	wg.Wait()
+	close(errChan)
+
+	rebuildErrors := make([]error, 0)
+	for err := range errChan {
+		rebuildErrors = append(rebuildErrors, err)
+		s.Error("message index rebuild failed", zap.Error(err))
+	}
+	if len(rebuildErrors) > 0 {
+		return errors.Join(rebuildErrors...)
+	}
+	if err := s.msgIndex.SetInternal([]byte(messageIndexMigrationKey), []byte(messageIndexMigrationReady)); err != nil {
+		return err
+	}
+	s.Info("message index rebuild complete", zap.Int("channelCount", len(channels)))
+	return nil
 }
 
 func (s *Search) Stop() {
@@ -516,27 +666,60 @@ type Message struct {
 	Topic        string  `json:"topic,omitempty"`         // 消息主题
 	Timestamp    uint32  `json:"timestamp,omitempty"`     // 时间戳
 	Score        float64 `json:"score"`                   // 相关度分数
+
+	ContentSubstrings string `json:"content_substrings,omitempty"`
 }
 
 func newMessageFrom(m *pluginproto.Message) *Message {
 
 	jsonObj := gjson.ParseBytes(m.Payload).Value()
+	content := gjson.GetBytes(m.Payload, "content").String()
 
 	return &Message{
-		MessageId:    int64(m.MessageId),
-		MessageIdStr: fmt.Sprintf("%d", m.MessageId),
-		MessageSeq:   m.MessageSeq,
-		ClientMsgNo:  m.ClientMsgNo,
-		FromUid:      m.From,
-		ChannelId:    m.ChannelId,
-		ChannelType:  uint8(m.ChannelType),
-		Payload:      jsonObj,
-		PayloadJson:  string(m.Payload),
-		StreamNo:     m.StreamNo,
-		StreamId:     m.StreamId,
-		Topic:        m.Topic,
-		Timestamp:    m.Timestamp,
+		MessageId:         int64(m.MessageId),
+		MessageIdStr:      fmt.Sprintf("%d", m.MessageId),
+		MessageSeq:        m.MessageSeq,
+		ClientMsgNo:       m.ClientMsgNo,
+		FromUid:           m.From,
+		ChannelId:         m.ChannelId,
+		ChannelType:       uint8(m.ChannelType),
+		Payload:           jsonObj,
+		PayloadJson:       string(m.Payload),
+		StreamNo:          m.StreamNo,
+		StreamId:          m.StreamId,
+		Topic:             m.Topic,
+		Timestamp:         m.Timestamp,
+		ContentSubstrings: strings.Join(asciiSearchTerms(content), " "),
 	}
 }
 
 type Payload interface{}
+
+func asciiSearchTerms(value string) []string {
+	terms := make([]string, 0)
+	var term strings.Builder
+
+	flush := func() {
+		if term.Len() == 0 {
+			return
+		}
+		terms = append(terms, term.String())
+		term.Reset()
+	}
+
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			term.WriteRune(r + ('a' - 'A'))
+		case r >= 'a' && r <= 'z':
+			term.WriteRune(r)
+		case r >= '0' && r <= '9':
+			term.WriteRune(r)
+		default:
+			flush()
+		}
+	}
+	flush()
+
+	return terms
+}
