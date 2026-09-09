@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/WuKongIM/go-pdk/pdk"
@@ -19,6 +20,8 @@ type bucket struct {
 	id        int
 	s         *Search
 	indexChan chan indexReq
+	// indexMu serializes startup rebuild and queued refreshes for this bucket.
+	indexMu sync.Mutex
 	wklog.Log
 }
 
@@ -68,20 +71,28 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 	}()
 
 	// 去重
-	uniqueReqs := make(map[string]indexReq)
+	uniqueReqs := make(map[string][]indexReq)
 	for _, req := range indexs {
 		key := fmt.Sprintf("%s:%d", req.channelId, req.channelType)
-		uniqueReqs[key] = req
+		uniqueReqs[key] = append(uniqueReqs[key], req)
 	}
 
 	// 对每个频道单独处理，避免一个频道的问题影响其他频道
-	for _, indexReq := range uniqueReqs {
-		_ = b.processChannelIndex(indexReq.channelId, indexReq.channelType)
+	for _, requests := range uniqueReqs {
+		request := requests[0]
+		err := b.processChannelIndex(request.channelId, request.channelType)
+		for _, request := range requests {
+			if request.done != nil {
+				request.done <- err
+			}
+		}
 	}
 }
 
 // processChannelIndex 处理单个频道的索引，内部循环直到索引完成
 func (b *bucket) processChannelIndex(channelId string, channelType uint8) error {
+	b.indexMu.Lock()
+	defer b.indexMu.Unlock()
 	const maxIterations = 100 // 防止无限循环
 	const limit = 500
 
@@ -162,7 +173,11 @@ func (b *bucket) fetchMessagesWithTimeout(req *pluginproto.ChannelMessageBatchRe
 	resultChan := make(chan rpcResult, 1)
 
 	go func() {
-		resp, err := pdk.S.GetChannelMessages(req)
+		fetch := b.s.fetchMessages
+		if fetch == nil {
+			fetch = pdk.S.GetChannelMessages
+		}
+		resp, err := fetch(req)
 		resultChan <- rpcResult{resp: resp, err: err}
 	}()
 
@@ -236,4 +251,6 @@ func (b *bucket) buildIndex(channelId string, channelType uint8, msgs []*pluginp
 type indexReq struct {
 	channelId   string
 	channelType uint8
+	// done is a buffered query waiter; a timed-out caller never blocks a worker.
+	done chan<- error
 }

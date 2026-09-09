@@ -43,6 +43,10 @@ type Search struct {
 	buckets  []*bucket
 	db       *db
 	msgIndex bleve.Index
+	// ready fences query refresh until the initial index rebuild is complete.
+	ready chan struct{}
+	// fetchMessages reads committed history; tests can supply an isolated host.
+	fetchMessages func(*pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error)
 	wklog.Log
 }
 
@@ -50,7 +54,11 @@ func New() *Search {
 	s := &Search{
 		buckets: make([]*bucket, 10),
 		db:      newDb(),
-		Log:     wklog.NewWKLog("search"),
+		ready:   make(chan struct{}),
+		fetchMessages: func(req *pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+			return pdk.S.GetChannelMessages(req)
+		},
+		Log: wklog.NewWKLog("search"),
 	}
 
 	for i := 0; i < len(s.buckets); i++ {
@@ -495,6 +503,7 @@ func buildNestedPayload(fields map[string]interface{}) map[string]interface{} {
 
 func (s *Search) Start() {
 	s.initDb()
+	close(s.ready)
 }
 
 func (s *Search) initDb() {

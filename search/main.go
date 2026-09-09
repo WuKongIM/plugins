@@ -20,7 +20,7 @@ import (
 )
 
 var pluginNo = "wk.plugin.search" // 插件编号
-var Version = "0.0.1"             // 插件版本
+var Version = "0.0.2"             // 插件版本
 var Priority = int32(1)           // 插件优先级
 
 func main() {
@@ -70,6 +70,16 @@ func (s Search) PersistAfter(c *pdk.Context) {
 func (s Search) search(c *pdk.HttpContext) {
 	var req search.SearchReq
 	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(err)
+		return
+	}
+	channels := req.Channels
+	if len(channels) == 0 && strings.TrimSpace(req.ChannelId) != "" {
+		channels = []*pluginproto.Channel{{ChannelId: req.ChannelId, ChannelType: uint32(req.ChannelType)}}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.s.RefreshChannels(ctx, channels); err != nil {
 		c.ResponseError(err)
 		return
 	}
@@ -181,6 +191,9 @@ func (s Search) usersearch(c *pdk.HttpContext) {
 			if err != nil {
 				s.Error("forward http error", zap.Error(err), zap.Uint64("nodeId", nodeId))
 				return fmt.Errorf("forward http error: %w", err)
+			}
+			if resp == nil || resp.Status < 200 || resp.Status >= 300 {
+				return fmt.Errorf("remote search index is unavailable; retry later")
 			}
 
 			searchResp := &search.SearchResp{}
