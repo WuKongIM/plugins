@@ -37,6 +37,11 @@ func (s *Search) RefreshChannels(ctx context.Context, channels []*pluginproto.Ch
 		}
 		unique[Channel{ChannelId: channel.ChannelId, ChannelType: uint8(channel.ChannelType)}] = struct{}{}
 	}
+	pending, err := s.channelsNeedingRefresh(ctx, unique)
+	if err != nil {
+		return err
+	}
+	unique = pending
 	done := make(chan error, len(unique))
 	for channel := range unique {
 		if err := ctx.Err(); err != nil {

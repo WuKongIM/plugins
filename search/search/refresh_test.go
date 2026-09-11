@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
 	"github.com/WuKongIM/wklog"
@@ -57,8 +59,8 @@ func TestRefreshChannelsRecoversMissedCommit(t *testing.T) {
 	if err := s.RefreshChannels(context.Background(), channels); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("duplicate channel fetched %d times", calls)
+	if calls != 2 {
+		t.Fatalf("channel fetched %d times, want one freshness check and one index fetch", calls)
 	}
 	resp, err := s.Search(SearchReq{Channels: channels, Payload: map[string]string{"content": "needle"}, Limit: 20})
 	if err != nil {
@@ -116,7 +118,16 @@ func TestIndexBatchSignalsEveryCoalescedWaiter(t *testing.T) {
 }
 
 func TestRefreshChannelsRejectsFullQueueAndOversizedScope(t *testing.T) {
-	s := &Search{ready: make(chan struct{})}
+	disk, err := pebble.Open(t.TempDir(), &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disk.Close()
+	s := &Search{ready: make(chan struct{}), db: newDb(), fetchMessages: func(req *pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+		c := req.ChannelMessageReqs[0]
+		return &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: c.ChannelId, ChannelType: c.ChannelType, Messages: []*pluginproto.Message{{MessageSeq: 1}}}}}, nil
+	}}
+	s.db.pebbleDb = disk
 	close(s.ready)
 	s.buckets = []*bucket{newBucket(0, s)}
 	for range cap(s.buckets[0].indexChan) {
@@ -158,5 +169,114 @@ func TestIndexQueueDoesNotDropWaitersAtBatchBoundary(t *testing.T) {
 		if err := <-done; !errors.Is(err, failure) {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A queued cold channel must not delay an already-current channel in the same bucket.
+func TestRefreshCurrentChannelBypassesBusyIndexWorker(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := refreshFixture(t, func(req *pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+		c := req.ChannelMessageReqs[0]
+		if c.ChannelId == "cold" {
+			close(started)
+			<-release
+		}
+		return &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: c.ChannelId, ChannelType: c.ChannelType}}}, nil
+	})
+	defer close(release)
+	s.buckets[0].indexChan <- indexReq{channelId: "cold", channelType: 2}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.RefreshChannels(ctx, []*pluginproto.Channel{{ChannelId: "current", ChannelType: 2}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRefreshCheckRejectsIncompleteAuthorityEvidence(t *testing.T) {
+	for _, response := range []*pluginproto.ChannelMessageBatchResp{
+		nil, {},
+		{ChannelMessageResps: []*pluginproto.ChannelMessageResp{nil}},
+		{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: "wrong", ChannelType: 2}}},
+		{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: "group", ChannelType: 2, Messages: []*pluginproto.Message{{MessageSeq: 0}}}}},
+	} {
+		s := refreshFixture(t, func(*pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+			return response, nil
+		})
+		if err := s.RefreshChannels(context.Background(), []*pluginproto.Channel{{ChannelId: "group", ChannelType: 2}}); err == nil {
+			t.Fatal("incomplete evidence accepted")
+		}
+	}
+}
+
+func TestRefreshChecksUseBoundedBatchesAndCurrentCheckpoints(t *testing.T) {
+	var mu sync.Mutex
+	calls, checked := 0, 0
+	s := refreshFixture(t, func(req *pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		checked += len(req.ChannelMessageReqs)
+		if len(req.ChannelMessageReqs) > 16 {
+			t.Errorf("unbounded request: %d", len(req.ChannelMessageReqs))
+		}
+		out := &pluginproto.ChannelMessageBatchResp{}
+		for _, c := range req.ChannelMessageReqs {
+			if c.StartMessageSeq != 8 || c.Limit != 1 {
+				t.Errorf("wrong freshness boundary: %v", c)
+			}
+			out.ChannelMessageResps = append(out.ChannelMessageResps, &pluginproto.ChannelMessageResp{ChannelId: c.ChannelId, ChannelType: c.ChannelType})
+		}
+		return out, nil
+	})
+	channels := make([]*pluginproto.Channel, 0, 65)
+	for i := range 65 {
+		id := fmt.Sprintf("channel-%d", i)
+		if err := s.db.setChannelMaxMessageSeq(id, 2, 7); err != nil {
+			t.Fatal(err)
+		}
+		channels = append(channels, &pluginproto.Channel{ChannelId: id, ChannelType: 2})
+	}
+	if err := s.RefreshChannels(context.Background(), channels); err != nil {
+		t.Fatal(err)
+	}
+	if checked != 65 || calls != 5 {
+		t.Fatalf("checked=%d calls=%d", checked, calls)
+	}
+}
+
+func TestRefreshCanceledReadsKeepTheirConcurrencySlotsUntilFinished(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 16)
+	finished := make(chan struct{}, 16)
+	s := &Search{fetchMessages: func(*pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+		entered <- struct{}{}
+		<-release
+		finished <- struct{}{}
+		return &pluginproto.ChannelMessageBatchResp{}, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	var callers sync.WaitGroup
+	for range 20 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			if _, err := s.fetchRefreshCheck(ctx, &pluginproto.ChannelMessageBatchReq{}); !errors.Is(err, context.Canceled) {
+				t.Errorf("got %v", err)
+			}
+		}()
+	}
+	for range 16 {
+		<-entered
+	}
+	cancel()
+	callers.Wait()
+	if len(s.refreshSlots) != 16 {
+		t.Fatalf("in-flight RPC slots=%d, want 16", len(s.refreshSlots))
+	}
+	close(release)
+	for range 16 {
+		<-finished
 	}
 }

@@ -6,8 +6,14 @@ owners. `/search` refreshes an explicit `channels` list, or a single
 This refresh is required after a leader change because `PersistAfter` is a
 best-effort notification and the new owner can have an older local index.
 
-At most 1,000 explicit channels are admitted per request. Existing bounded
-indexing queues coalesce work; a query waits up to three seconds. A full queue,
+At most 1,000 explicit channels are admitted per request. Before enqueueing,
+refresh checks committed history after each persisted index checkpoint in
+batches of 16 channels, with at most four concurrent reads per query and 16
+in-flight reads per plugin process. Only complete, aligned empty pages prove a
+channel current, allowing it to bypass a queue occupied by another channel’s
+cold rebuild. Canceled callers retain their read slots until the underlying RPC
+returns. Channels with new messages enter the existing bounded indexing queues;
+a query waits up to three seconds. A full queue,
 history-read failure, or timeout returns an error rather than a successful
 partial result. Already queued indexing can finish after the caller times out,
 so retrying can make progress through a large backlog. Startup rebuild and

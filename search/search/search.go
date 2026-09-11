@@ -45,6 +45,9 @@ type Search struct {
 	msgIndex bleve.Index
 	// ready fences query refresh until the initial index rebuild is complete.
 	ready chan struct{}
+	// refreshSlots bounds host reads that may outlive a canceled query.
+	refreshOnce  sync.Once
+	refreshSlots chan struct{}
 	// fetchMessages reads committed history; tests can supply an isolated host.
 	fetchMessages func(*pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error)
 	wklog.Log
