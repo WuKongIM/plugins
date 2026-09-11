@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
@@ -127,5 +128,35 @@ func TestRefreshChannelsRejectsFullQueueAndOversizedScope(t *testing.T) {
 	}
 	if err := s.RefreshChannels(context.Background(), make([]*pluginproto.Channel, 1001)); err == nil {
 		t.Fatal("oversized scope accepted")
+	}
+}
+
+// A full batch must leave the next queued request for the next iteration.
+func TestIndexQueueDoesNotDropWaitersAtBatchBoundary(t *testing.T) {
+	disk, err := pebble.Open(t.TempDir(), &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disk.Close()
+	failure := errors.New("history unavailable")
+	s := &Search{db: newDb(), fetchMessages: func(*pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+		return nil, failure
+	}}
+	s.db.pebbleDb = disk
+	b := newBucket(0, s)
+	const count = 205
+	done := make(chan error, count)
+	for i := range count {
+		b.indexChan <- indexReq{channelId: fmt.Sprintf("group-%d", i), channelType: 2, done: done}
+	}
+	close(b.indexChan)
+	b.loopIndex()
+	if len(done) != count {
+		t.Fatalf("notifications=%d, want %d", len(done), count)
+	}
+	for range count {
+		if err := <-done; !errors.Is(err, failure) {
+			t.Fatal(err)
+		}
 	}
 }

@@ -38,27 +38,25 @@ func (b *bucket) start() {
 	go b.loopIndex()
 }
 
+// loopIndex drains bounded batches without consuming a request past the limit.
 func (b *bucket) loopIndex() {
-	batchSize := 100
+	const batchSize = 100
 	reqs := make([]indexReq, 0, batchSize)
-	done := false
 	for req := range b.indexChan {
-		reqs = append(reqs, req)
-		for !done {
+		reqs = append(reqs[:0], req)
+	drain:
+		for len(reqs) < batchSize {
 			select {
-			case req := <-b.indexChan:
-				if len(reqs) > batchSize {
-					done = true
-					break
+			case req, ok := <-b.indexChan:
+				if !ok {
+					break drain
 				}
 				reqs = append(reqs, req)
 			default:
-				done = true
+				break drain
 			}
 		}
 		b.handleIndex(reqs)
-		reqs = reqs[:0]
-		done = false
 	}
 }
 
