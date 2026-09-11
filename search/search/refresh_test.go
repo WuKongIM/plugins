@@ -280,3 +280,39 @@ func TestRefreshCanceledReadsKeepTheirConcurrencySlotsUntilFinished(t *testing.T
 		<-finished
 	}
 }
+
+func TestRefreshRejectsIncompleteIndexResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response *pluginproto.ChannelMessageBatchResp
+	}{
+		{"nil", nil},
+		{"missing", &pluginproto.ChannelMessageBatchResp{}},
+		{"nil page", &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{nil}}},
+		{"wrong channel", &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: "other", ChannelType: 2}}}},
+		{"wrong type", &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: "group", ChannelType: 1}}}},
+		{"nil message", &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: "group", ChannelType: 2, Messages: []*pluginproto.Message{nil}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			s := refreshFixture(t, func(req *pluginproto.ChannelMessageBatchReq) (*pluginproto.ChannelMessageBatchResp, error) {
+				calls++
+				if calls == 1 {
+					return &pluginproto.ChannelMessageBatchResp{ChannelMessageResps: []*pluginproto.ChannelMessageResp{{ChannelId: "group", ChannelType: 2, Messages: []*pluginproto.Message{{MessageSeq: 1}}}}}, nil
+				}
+				return tc.response, nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := s.RefreshChannels(ctx, []*pluginproto.Channel{{ChannelId: "group", ChannelType: 2}}); err == nil {
+				t.Fatal("pending history was declared indexed without aligned evidence")
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("malformed response stranded its completion waiter")
+			}
+			seq, err := s.db.getChannelMaxMessageSeq("group", 2)
+			if err != nil || seq != 0 {
+				t.Fatalf("checkpoint advanced:%d %v", seq, err)
+			}
+		})
+	}
+}

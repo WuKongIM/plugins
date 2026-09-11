@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Scoped search refreshes only its allowed query intersection; indexing rejects incomplete or misaligned history before advancing checkpoints. All history RPCs share a process bound. / 单频道搜索仅刷新授权查询交集；索引拒绝不完整或错配历史，所有历史查询共用进程级并发上限。
+
 - Search verifies current channel checkpoints with bounded committed-history reads before enqueueing, so unrelated cold index rebuilds do not block already-current channels. / 搜索先通过有界的已提交历史查询核对索引位置，已同步频道不再等待其他频道的冷索引重建。
 
 - Search refresh queues preserve every completion notification when draining full batches, preventing avoidable query timeouts under backlog. / 修复搜索刷新队列在批次边界丢失完成通知、造成查询超时的问题。
