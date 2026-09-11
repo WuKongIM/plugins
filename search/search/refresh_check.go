@@ -31,7 +31,7 @@ func (s *Search) channelsNeedingRefresh(ctx context.Context, channels map[Channe
 	pending := make(map[Channel]struct{})
 	var mu sync.Mutex
 	group, readCtx := errgroup.WithContext(ctx)
-	group.SetLimit(4)
+	group.SetLimit(16)
 	for start := 0; start < len(requests); start += batchSize {
 		batch := requests[start:min(start+batchSize, len(requests))]
 		group.Go(func() error {

@@ -8,7 +8,7 @@ best-effort notification and the new owner can have an older local index.
 
 At most 1,000 explicit channels are admitted per request. Before enqueueing,
 refresh checks committed history after each persisted index checkpoint in
-batches of 16 channels, with at most four concurrent reads per query and 16
+batches of 16 channels, with at most 16 concurrent reads per query and 16
 in-flight reads per plugin process. Only complete, aligned empty pages prove a
 channel current, allowing it to bypass a queue occupied by another channel’s
 cold rebuild. Canceled callers retain their read slots until the underlying RPC
@@ -29,3 +29,6 @@ runtime executable before startup acceptance. Verify historical results, a write
 through only one node followed by leader replacement, and full-cluster restarts.
 Do not treat server readiness or writes rotating through every node as proof of
 search-index freshness.
+
+Refreshes slower than one second log the bounded phase, scope count, pending
+channel count, and elapsed time without message payloads or user identifiers.
