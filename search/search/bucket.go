@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
-	"github.com/WuKongIM/go-pdk/pdk"
 	"github.com/WuKongIM/go-pdk/pdk/pluginproto"
 	"github.com/WuKongIM/wklog"
 	"github.com/tidwall/gjson"
@@ -19,6 +19,8 @@ type bucket struct {
 	id        int
 	s         *Search
 	indexChan chan indexReq
+	// indexMu serializes startup rebuild and queued refreshes for this bucket.
+	indexMu sync.Mutex
 	wklog.Log
 }
 
@@ -35,27 +37,25 @@ func (b *bucket) start() {
 	go b.loopIndex()
 }
 
+// loopIndex drains bounded batches without consuming a request past the limit.
 func (b *bucket) loopIndex() {
-	batchSize := 100
+	const batchSize = 100
 	reqs := make([]indexReq, 0, batchSize)
-	done := false
 	for req := range b.indexChan {
-		reqs = append(reqs, req)
-		for !done {
+		reqs = append(reqs[:0], req)
+	drain:
+		for len(reqs) < batchSize {
 			select {
-			case req := <-b.indexChan:
-				if len(reqs) > batchSize {
-					done = true
-					break
+			case req, ok := <-b.indexChan:
+				if !ok {
+					break drain
 				}
 				reqs = append(reqs, req)
 			default:
-				done = true
+				break drain
 			}
 		}
 		b.handleIndex(reqs)
-		reqs = reqs[:0]
-		done = false
 	}
 }
 
@@ -68,20 +68,28 @@ func (b *bucket) handleIndex(indexs []indexReq) {
 	}()
 
 	// 去重
-	uniqueReqs := make(map[string]indexReq)
+	uniqueReqs := make(map[string][]indexReq)
 	for _, req := range indexs {
 		key := fmt.Sprintf("%s:%d", req.channelId, req.channelType)
-		uniqueReqs[key] = req
+		uniqueReqs[key] = append(uniqueReqs[key], req)
 	}
 
 	// 对每个频道单独处理，避免一个频道的问题影响其他频道
-	for _, indexReq := range uniqueReqs {
-		_ = b.processChannelIndex(indexReq.channelId, indexReq.channelType)
+	for _, requests := range uniqueReqs {
+		request := requests[0]
+		err := b.processChannelIndex(request.channelId, request.channelType)
+		for _, request := range requests {
+			if request.done != nil {
+				request.done <- err
+			}
+		}
 	}
 }
 
 // processChannelIndex 处理单个频道的索引，内部循环直到索引完成
 func (b *bucket) processChannelIndex(channelId string, channelType uint8) error {
+	b.indexMu.Lock()
+	defer b.indexMu.Unlock()
 	const maxIterations = 100 // 防止无限循环
 	const limit = 500
 
@@ -110,12 +118,20 @@ func (b *bucket) processChannelIndex(channelId string, channelType uint8) error 
 			return err
 		}
 
-		if messageResp == nil || len(messageResp.ChannelMessageResps) == 0 {
-			b.Info("channel message is empty, indexing complete", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
-			return nil
+		if messageResp == nil || len(messageResp.ChannelMessageResps) != 1 {
+			return errors.New("incomplete channel indexing response")
 		}
-
 		resp := messageResp.ChannelMessageResps[0]
+		if resp == nil || resp.ChannelId != channelId || resp.ChannelType != uint32(channelType) {
+			return errors.New("misaligned channel indexing response")
+		}
+		previousSeq := msgSeq
+		for _, msg := range resp.Messages {
+			if msg == nil || msg.ChannelId != channelId || msg.ChannelType != uint32(channelType) || msg.MessageSeq <= previousSeq {
+				return errors.New("invalid channel indexing message")
+			}
+			previousSeq = msg.MessageSeq
+		}
 		if len(resp.Messages) == 0 {
 			b.Info("no new messages, indexing complete", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
 			return nil
@@ -155,32 +171,15 @@ func (b *bucket) processChannelIndex(channelId string, channelType uint8) error 
 
 // fetchMessagesWithTimeout 带超时的消息获取
 func (b *bucket) fetchMessagesWithTimeout(req *pluginproto.ChannelMessageBatchReq, timeout time.Duration) (*pluginproto.ChannelMessageBatchResp, error) {
-	type rpcResult struct {
-		resp *pluginproto.ChannelMessageBatchResp
-		err  error
-	}
-	resultChan := make(chan rpcResult, 1)
-
-	go func() {
-		resp, err := pdk.S.GetChannelMessages(req)
-		resultChan <- rpcResult{resp: resp, err: err}
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
-	select {
-	case result := <-resultChan:
-		return result.resp, result.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("get channel message timeout after %v", timeout)
-	}
+	return b.s.fetchRefreshCheck(ctx, req)
 }
 
 func (b *bucket) buildIndex(channelId string, channelType uint8, msgs []*pluginproto.Message) error {
 	if b.s.msgIndex == nil {
 		b.Error("search: msg index is nil", zap.String("channelId", channelId), zap.Uint8("channelType", channelType))
-		return nil
+		return errors.New("search message index unavailable")
 	}
 	b.Info("buildIndex: indexing messages", zap.String("channelId", channelId), zap.Uint8("channelType", channelType), zap.Int("messageCount", len(msgs)))
 	batch := b.s.msgIndex.NewBatch()
@@ -236,4 +235,6 @@ func (b *bucket) buildIndex(channelId string, channelType uint8, msgs []*pluginp
 type indexReq struct {
 	channelId   string
 	channelType uint8
+	// done is a buffered query waiter; a timed-out caller never blocks a worker.
+	done chan<- error
 }
